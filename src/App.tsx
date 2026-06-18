@@ -244,6 +244,20 @@ export default function App() {
   });
 
   useEffect(() => {
+    // Mengisi riwayat awal agar grafik tidak kosong saat pertama kali dimuat
+    const initialHistory: HistoricalData[] = [];
+    const now = new Date();
+    for (let i = 20; i >= 0; i--) {
+      const t = new Date(now.getTime() - i * 2500);
+      initialHistory.push({
+        time: t.toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' }),
+        respRate: 16,
+        spo2: 98, // Detak jantung awal
+        temp: 36.8,
+      });
+    }
+    setDataHistory(initialHistory);
+
     // Hubungkan ke HiveMQ menggunakan wss (WebSocket Secure)
     const brokerUrl = "wss://096d892966dc40f687e38c2a80e38de8.s1.eu.hivemq.cloud:8884/mqtt";
     const clientId = "WebDashboard-" + Math.random().toString(16).substr(2, 8);
