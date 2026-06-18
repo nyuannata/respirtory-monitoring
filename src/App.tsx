@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import mqtt from 'mqtt';
 import { 
   Wind, 
   Thermometer, 
@@ -243,123 +244,114 @@ export default function App() {
   });
 
   useEffect(() => {
-    const initialHistory: HistoricalData[] = [];
-    const now = new Date();
-    for (let i = 20; i >= 0; i--) {
-      const t = new Date(now.getTime() - i * 2500);
-      initialHistory.push({
-        time: t.toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' }),
-        respRate: 16 + (Math.random() * 2 - 1),
-        spo2: 98 + (Math.random() * 2 - 1),
-        temp: 36.8 + (Math.random() * 0.2 - 0.1),
-      });
-    }
-    setDataHistory(initialHistory);
+    // Hubungkan ke HiveMQ menggunakan wss (WebSocket Secure)
+    const brokerUrl = "wss://096d892966dc40f687e38c2a80e38de8.s1.eu.hivemq.cloud:8884/mqtt";
+    const clientId = "WebDashboard-" + Math.random().toString(16).substr(2, 8);
+    
+    const client = mqtt.connect(brokerUrl, {
+      clientId: clientId,
+      username: "yuannatan",
+      password: "Yuanmqtt123"
+    });
 
-    const interval = setInterval(() => {
-      const s = stateRef.current;
-      s.timeCounter += 1;
+    client.on('connect', () => {
+      console.log('Terhubung ke HiveMQ');
+      client.subscribe('health/monitoring/data');
+      client.subscribe('health/monitoring/hasil');
+    });
 
-      if (!s.crisisMode && Math.random() < 0.05 && s.timeCounter > 5) {
-        s.crisisMode = true;
-        s.crisisCounter = 10;
-      } else if (s.crisisMode) {
-        s.crisisCounter -= 1;
-        if (s.crisisCounter <= 0) s.crisisMode = false;
-      }
+    client.on('message', (topic, message) => {
+      try {
+        const payload = JSON.parse(message.toString());
+        
+        if (topic === 'health/monitoring/data') {
+          // payload: { suhu, bpm, rr }
+          setCurrentData(prev => {
+            const evaluateRespColor = (val: number): Status => {
+              if (val > 25) return 'bahaya';
+              if (val >= 21) return 'peringatan';
+              return 'normal';
+            };
+            const evaluateSpo2Color = (val: number): Status => {
+              // Mapping ini disesuaikan untuk rentang BPM
+              if (val > 100 || val < 60) return 'bahaya';
+              if (val > 90 || val < 65) return 'peringatan';
+              return 'normal';
+            };
+            const evaluateTempColor = (val: number): Status => {
+              if (val > 38.0) return 'bahaya';
+              if (val >= 37.6) return 'peringatan';
+              return 'normal';
+            };
 
-      if (s.crisisMode) {
-        s.respRate += Math.random() * 3;
-        s.spo2 -= Math.random() * 2.5;
-        s.temp += Math.random() * 0.2;
-      } else {
-        s.respRate += (16 - s.respRate) * 0.2 + (Math.random() * 1.5 - 0.75);
-        s.spo2 += (98 - s.spo2) * 0.2 + (Math.random() * 1.5 - 0.75);
-        s.temp += (36.8 - s.temp) * 0.1 + (Math.random() * 0.1 - 0.05);
-      }
+            const newResp = evaluateRespColor(payload.rr);
+            const newBpm = evaluateSpo2Color(payload.bpm);
+            const newTemp = evaluateTempColor(payload.suhu);
 
-      s.respRate = Math.max(12, Math.min(30, s.respRate));
-      s.spo2 = Math.max(85, Math.min(100, s.spo2));
-      s.temp = Math.max(36.0, Math.min(38.5, s.temp));
+            const tickTime = new Date();
+            setDataHistory(oldHistory => {
+              const next = [...(oldHistory.length > 20 ? oldHistory.slice(1) : oldHistory), {
+                time: tickTime.toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' }),
+                respRate: parseFloat(payload.rr),
+                spo2: parseFloat(payload.bpm), // Mapping BPM ke properti spo2 agar grafik tidak perlu banyak diubah
+                temp: parseFloat(payload.suhu),
+              }];
+              return next;
+            });
 
-      let overallStatus: Status = 'normal';
-      let rec = 'Kondisi stabil';
-
-      if (s.spo2 < 90 || s.respRate > 25) {
-        overallStatus = 'bahaya';
-        rec = 'Segera cari bantuan medis';
-      } else if ((s.spo2 >= 90 && s.spo2 <= 94) || (s.respRate >= 21 && s.respRate <= 25)) {
-        overallStatus = 'peringatan';
-        rec = 'Istirahat dan pantau berkala';
-      } else if (s.spo2 >= 95 && s.respRate >= 12 && s.respRate <= 20) {
-        overallStatus = 'normal';
-        rec = 'Kondisi stabil';
-      }
-
-      const evaluateRespColor = (val: number): Status => {
-        if (val > 25) return 'bahaya';
-        if (val >= 21) return 'peringatan';
-        return 'normal';
-      };
-      const evaluateSpo2Color = (val: number): Status => {
-        if (val < 90) return 'bahaya';
-        if (val <= 94) return 'peringatan';
-        return 'normal';
-      };
-      const evaluateTempColor = (val: number): Status => {
-        if (val > 38.0) return 'bahaya';
-        if (val >= 37.6) return 'peringatan';
-        return 'normal';
-      };
-
-      const newRespStatus = evaluateRespColor(s.respRate);
-      const newSpo2Status = evaluateSpo2Color(s.spo2);
-      const newTempStatus = evaluateTempColor(s.temp);
-
-      setCurrentData(prev => ({
-        respRate: { 
-          value: parseFloat(s.respRate.toFixed(1)), 
-          status: newRespStatus,
-          trend: s.respRate > prev.respRate.value ? 'naik' : s.respRate < prev.respRate.value ? 'turun' : 'stabil'
-        },
-        spo2: { 
-          value: parseFloat(s.spo2.toFixed(1)), 
-          status: newSpo2Status,
-          trend: s.spo2 > prev.spo2.value ? 'naik' : s.spo2 < prev.spo2.value ? 'turun' : 'stabil'
-        },
-        temp: { 
-          value: parseFloat(s.temp.toFixed(1)), 
-          status: newTempStatus,
-          trend: s.temp > prev.temp.value ? 'naik' : s.temp < prev.temp.value ? 'turun' : 'stabil'
+            return {
+              respRate: { 
+                value: parseFloat(payload.rr), 
+                status: newResp,
+                trend: payload.rr > prev.respRate.value ? 'naik' : payload.rr < prev.respRate.value ? 'turun' : 'stabil'
+              },
+              spo2: { 
+                value: parseFloat(payload.bpm), 
+                status: newBpm,
+                trend: payload.bpm > prev.spo2.value ? 'naik' : payload.bpm < prev.spo2.value ? 'turun' : 'stabil'
+              },
+              temp: { 
+                value: parseFloat(payload.suhu), 
+                status: newTemp,
+                trend: payload.suhu > prev.temp.value ? 'naik' : payload.suhu < prev.temp.value ? 'turun' : 'stabil'
+              }
+            };
+          });
         }
-      }));
+        
+        if (topic === 'health/monitoring/hasil') {
+          // payload: { status_pasien: "Normal" }
+          const kondisi = payload.status_pasien;
+          let status: Status = 'normal';
+          let conf = 95;
+          let rec = 'Diagnosis: ' + kondisi;
+          
+          if (kondisi.toLowerCase().includes('peringatan')) {
+             status = 'peringatan';
+             conf = 88 + Math.floor(Math.random() * 6);
+          } else if (kondisi.toLowerCase().includes('bahaya') || kondisi.toLowerCase().includes('kritis')) {
+             status = 'bahaya';
+             conf = 98 - Math.floor(Math.random() * 2);
+          } else {
+             status = 'normal';
+             conf = 96 + Math.floor(Math.random() * 4);
+          }
+          
+          setAiAnalysis(prev => ({
+            ...prev,
+            status: status,
+            recommendation: rec,
+            confidence: conf
+          }));
+        }
+      } catch (err) {
+        console.error("Gagal parse message:", err);
+      }
+    });
 
-      let conf = 95;
-      if (overallStatus === 'bahaya') conf = 98 - Math.floor(Math.random() * 2);
-      else if (overallStatus === 'peringatan') conf = 88 + Math.floor(Math.random() * 6);
-      else conf = 96 + Math.floor(Math.random() * 4);
-
-      setAiAnalysis(prev => ({
-        ...prev,
-        status: overallStatus,
-        recommendation: rec,
-        confidence: conf
-      }));
-
-      const tickTime = new Date();
-      setDataHistory(prev => {
-        const next = [...prev.slice(1), {
-          time: tickTime.toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' }),
-          respRate: parseFloat(s.respRate.toFixed(1)),
-          spo2: parseFloat(s.spo2.toFixed(1)),
-          temp: parseFloat(s.temp.toFixed(1)),
-        }];
-        return next;
-      });
-
-    }, 2500);
-
-    return () => clearInterval(interval);
+    return () => {
+      client.end();
+    };
   }, []);
 
   const getStatusColorConfig = (status: Status) => {
@@ -489,10 +481,10 @@ export default function App() {
                    <span className={cn("text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md transition-colors duration-500",
                      getStatusColorConfig(currentData.spo2.status).lightBg,
                      getStatusColorConfig(currentData.spo2.status).text
-                   )}>SPO2</span>
+                   )}>BPM</span>
                 </div>
               </div>
-              <p className="text-sm text-slate-500 font-semibold relative z-10">Saturasi Oksigen</p>
+              <p className="text-sm text-slate-500 font-semibold relative z-10">Detak Jantung</p>
               <div className="flex items-baseline space-x-2 mt-1 relative z-10">
                 <AnimatePresence mode="popLayout">
                   <motion.span 
@@ -508,7 +500,7 @@ export default function App() {
                     {currentData.spo2.value.toFixed(1)}
                   </motion.span>
                 </AnimatePresence>
-                <span className="text-slate-400 text-sm font-semibold">%</span>
+                <span className="text-slate-400 text-sm font-semibold">BPM</span>
               </div>
             </motion.div>
 
@@ -572,7 +564,7 @@ export default function App() {
                 </div>
                 <div className="flex items-center space-x-2 text-[10px] font-bold text-indigo-500 uppercase tracking-widest">
                   <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.4)]"></span>
-                  <span>SpO2</span>
+                  <span>Detak Jantung</span>
                 </div>
               </div>
             </div>
@@ -632,7 +624,7 @@ export default function App() {
                     yAxisId="right"
                     type="monotone" 
                     dataKey="spo2" 
-                    name="SpO2"
+                    name="Detak Jantung"
                     stroke="#6366f1" 
                     strokeWidth={3} 
                     dot={false}
@@ -701,10 +693,10 @@ export default function App() {
                 </p>
                 <p className="text-sm text-slate-600 leading-relaxed font-medium transition-colors duration-500">
                   {aiAnalysis.status === 'bahaya' 
-                    ? 'Anomali kritis terdeteksi pada SpO2 atau laju pernapasan. Intervensi medis diperlukan segera.'
+                    ? '🚨 Segera hubungi tenaga medis darurat! Periksa alat bantu pernapasan, pastikan jalur napas tidak terhalang, dan persiapkan tabung oksigen cadangan jika diperlukan.'
                     : aiAnalysis.status === 'peringatan'
-                    ? 'Nilai mendekati ambang batas bahaya. Harap pastikan pasien sedang beristirahat.'
-                    : 'Semua organ vital pasien saat ini berada dalam rentang biologis yang stabil.'}
+                    ? '⚠️ Pasien menunjukkan gejala sesak ringan. Minta pasien untuk rileks, atur posisi duduk lebih tegak (Fowler), dan pantau terus perubahan angkanya selama 15 menit ke depan.'
+                    : '✅ Kondisi pernapasan dan detak jantung pasien stabil. Lanjutkan pemantauan rutin dan pastikan pasien beristirahat di ruangan dengan sirkulasi udara yang baik.'}
                 </p>
               </div>
 
