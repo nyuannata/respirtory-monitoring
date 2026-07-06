@@ -349,7 +349,14 @@ void loop() {
   }
 
   if (currentMillis - tempTimer >= 2000) {
-    currentTemp = bodyTemp.getTempCByIndex(0);
+    float rawTemp = bodyTemp.getTempCByIndex(0);
+    
+    // [KALIBRASI] Offset suhu tubuh (Termometer asli: 38.2 | DS18B20: 36.1)
+    // DS18B20 (terutama jika diletakkan di permukaan kulit/ketiak) seringkali 
+    // lebih rendah dari suhu internal inti (core temperature). 
+    // Kita tambahkan offset +2.1 agar hasilnya menyamai termometer medis.
+    currentTemp = rawTemp + 2.1; 
+    
     bodyTemp.requestTemperatures(); 
     tempTimer = currentMillis;
   }

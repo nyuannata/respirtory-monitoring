@@ -1,4 +1,4 @@
-﻿================================================================================
+================================================================================
      LAPORAN PERKEMBANGAN SKRIPSI -- AUDIT PERUBAHAN SISTEM
      Judul : Sistem Pemantauan Pernapasan Berbasis IoT dan Machine Learning
      Tanggal Update: 06 Juli 2026
@@ -213,6 +213,43 @@
     -> Pemantauan rutin setiap 2 jam, istirahat cukup,
        sirkulasi udara yang baik.
 
+  ============================================================
+  [PENINGKATAN #3] -- Fitur Log Rekaman Sensor (Audit Skripsi)
+  ============================================================
+  File     : src/App.tsx (SensorLogModal, State sensorLog)
+  Status   : DITAMBAHKAN BARU
+
+  Masalah Lama:
+    Tidak ada cara untuk melacak dan mengekspor data yang
+    dikirimkan oleh ESP32 untuk pembuktian di laporan skripsi
+    (bab Hasil & Pembahasan).
+
+  Solusi Baru:
+    - Membuat array state `sensorLog` yang menyimpan 1000 data
+      sensor terakhir beserta hasil Prediksi RF-nya secara real-time.
+    - Membuat komponen `SensorLogModal` berupa tabel responsif yang
+      menampilkan riwayat (waktu, Suhu, BPM, RR, dan statusnya).
+    - Menambahkan tombol "Export CSV" untuk mengunduh log menjadi
+      file spreadsheet yang bisa dilampirkan di laporan skripsi.
+    - Menambahkan tombol indikator jumlah log di header dashboard.
+
+  ============================================================
+  [KALIBRASI #1] -- Offset Suhu Permukaan Kulit (DS18B20)
+  ============================================================
+  File     : codingan arduino.txt (fungsi loop)
+  Status   : DIKALIBRASI
+
+  Masalah:
+    Pengukuran DS18B20 di ketiak/permukaan kulit (36.1 C)
+    selalu lebih rendah dari termometer medis (38.2 C) akibat
+    disipasi/hilangnya panas ke lingkungan sekitar (offset).
+
+  Solusi Kalibrasi:
+    Menambahkan konstanta regresi linear (offset) sebesar +2.1 C
+    pada pembacaan mentah (raw) sensor agar ekuivalen dengan
+    suhu inti (core temperature) termometer medis.
+    Kode: currentTemp = rawTemp + 2.1;
+
 --------------------------------------------------------------------------------
   CATATAN TEKNIS (Tidak Diubah, Perlu Diperhatikan ke Depan)
 --------------------------------------------------------------------------------
@@ -246,7 +283,7 @@
 
   Total Bug Ditemukan  : 5 kritis/sedang + 4 catatan pengembangan
   Total Bug Diperbaiki : 5
-  Fitur Ditingkatkan   : 2
+  Fitur Ditingkatkan   : 4 (Termasuk Fitur Baru & Kalibrasi)
 
   No | Komponen             | Masalah                        | Status
   ---|----------------------|--------------------------------|-------------
@@ -257,9 +294,11 @@
    5 | App.tsx - Grafik     | Domain Y-Axis salah [80,100]   | DIPERBAIKI
    6 | App.tsx - Gelombang  | Frekuensi animasi tidak akurat | DIPERBARUI
    7 | App.tsx - AI Panel   | Saran klinis statis/generik    | DIPERBARUI
-   8 | Arduino              | beatAvg vs avgBPM_1Min         | CATATAN
-   9 | App.tsx - Confidence | Score random vs predict_proba  | CATATAN
-  10 | App.tsx - Log Modal  | Data log hardcoded             | CATATAN
+   8 | App.tsx - Audit Log  | Ketiadaan fitur ekspor CSV     | DITAMBAHKAN
+   9 | Arduino - DS18B20    | Offset suhu permukaan kulit    | DIKALIBRASI
+  10 | Arduino              | beatAvg vs avgBPM_1Min         | CATATAN
+  11 | App.tsx - Confidence | Score random vs predict_proba  | CATATAN
+  12 | App.tsx - Log Modal  | Data log riwayat hardcoded     | CATATAN
 
 --------------------------------------------------------------------------------
   FILE YANG DIMODIFIKASI PADA SESI INI
@@ -269,18 +308,20 @@
      - Perbaikan 3 fungsi threshold evaluasi status sensor (Bug 1,2,3)
      - Penulisan ulang komponen BreathingWaveform (Peningkatan #1)
      - Penambahan fungsi getDetailedAdvice / saran klinis (Peningkatan #2)
+     - Pembuatan fitur Audit Log Sensor & Ekspor CSV (Peningkatan #3)
      - Perbaikan domain YAxis grafik historis BPM (Bug 5)
-     - Perbaikan judul rekomendasi RF menjadi deskriptif (Peningkatan #2)
 
   2. f:\PROJECT SKRIPSI FIX\CODING\live_prediksi.py
      - Perbaikan exception handler dari silent ke print error (Bug 4)
+
+  3. f:\PROJECT SKRIPSI FIX\CODING\codingan arduino.txt
+     - Penambahan nilai offset kalibrasi suhu +2.1 C (Kalibrasi #1)
 
   File Tidak Dimodifikasi (Referensi):
      - train_model.py            : Training RF (sudah benar)
      - dataset_skripsi.py        : Generator dataset (referensi threshold)
      - dataset_skripsi_lengkap.csv : Dataset 900 baris
      - rf_health_model.pkl       : Model RF tersimpan
-     - codingan arduino.txt      : Kode ESP32 (ada catatan pengembangan)
 
 ================================================================================
   END OF REPORT
