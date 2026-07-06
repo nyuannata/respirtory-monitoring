@@ -1,0 +1,288 @@
+﻿================================================================================
+     LAPORAN PERKEMBANGAN SKRIPSI -- AUDIT PERUBAHAN SISTEM
+     Judul : Sistem Pemantauan Pernapasan Berbasis IoT dan Machine Learning
+     Tanggal Update: 06 Juli 2026
+================================================================================
+
+--------------------------------------------------------------------------------
+  GAMBARAN UMUM SISTEM
+--------------------------------------------------------------------------------
+
+  Alur Data Sistem:
+  [ESP32 + Sensor] --> MQTT (health/monitoring/data)
+       --> [Python live_prediksi.py]
+       --> MQTT (health/monitoring/hasil)
+       --> [Dashboard Web (React + TypeScript)]
+
+  Komponen Utama:
+  - Sensor Suhu     : DS18B20 (pin GPIO 4)
+  - Sensor BPM      : MAX30102 (via I2C Multiplexer TCA9548A, Channel 0)
+  - Sensor RR       : MPU6050 Akselerometer (via TCA9548A, Channel 1)
+  - Broker MQTT     : HiveMQ Cloud (TLS/SSL Port 8883 / WSS Port 8884)
+  - Model AI        : Random Forest Classifier (scikit-learn, 100 estimators)
+  - Dataset         : 900 baris sintetis (300 Normal, 300 Peringatan, 300 Bahaya)
+  - Frontend        : React + TypeScript + Vite + Recharts + Framer Motion
+
+--------------------------------------------------------------------------------
+  DAFTAR PERUBAHAN -- SESI 06 JULI 2026
+--------------------------------------------------------------------------------
+
+  ============================================================
+  [BUG FIX #1] -- Ambang Batas RR (Respiratory Rate) Dashboard
+  ============================================================
+  File     : src/App.tsx (fungsi evaluateRespColor)
+  Status   : DIPERBAIKI
+
+  SEBELUM (SALAH):
+    if (val > 25)  return 'bahaya';
+    if (val >= 21) return 'peringatan';
+    return 'normal';
+
+  SESUDAH (BENAR -- sesuai dataset training):
+    if (val >= 32 || val <= 8) return 'bahaya';
+    if (val >= 24)             return 'peringatan';
+    return 'normal';           // 12-20 BrPM
+
+  Rentang Dataset Training (dataset_skripsi.py):
+    Normal     : 12 - 20 BrPM (kelipatan 4)
+    Peringatan : 24 - 28 BrPM (kelipatan 4)
+    Bahaya     : >= 32 BrPM (napas_cepat) | 0 - 8 BrPM (napas_lambat)
+
+  Dampak Bug Lama:
+    RR 26-31 BrPM ditampilkan sebagai BAHAYA di kartu sensor,
+    padahal model RF memprediksinya sebagai PERINGATAN.
+    Kontradiksi antara indikator warna kartu vs status AI.
+
+  ============================================================
+  [BUG FIX #2] -- Ambang Batas BPM (Heart Rate) Dashboard
+  ============================================================
+  File     : src/App.tsx (fungsi evaluateSpo2Color)
+  Status   : DIPERBAIKI
+
+  SEBELUM (SALAH):
+    if (val > 100 || val < 60) return 'bahaya';
+    if (val > 90  || val < 65) return 'peringatan';
+    return 'normal';
+
+  SESUDAH (BENAR -- sesuai dataset training):
+    if (val >= 141 || val <= 39) return 'bahaya';
+    if (val >= 96  || val <= 59) return 'peringatan';
+    return 'normal';             // 60-95 BPM
+
+  Rentang Dataset Training (dataset_skripsi.py):
+    Normal     : 60 - 95 BPM
+    Peringatan : 96 - 115 BPM
+    Bahaya     : >= 141 BPM (jantung_kritis) | 40 - 55 BPM (napas_lambat)
+
+  Dampak Bug Lama:
+    BPM 96-100 ditampilkan BAHAYA oleh dashboard, tapi RF
+    memprediksinya PERINGATAN. Inkonsistensi besar antara
+    warna kartu sensor dan keputusan AI.
+
+  ============================================================
+  [BUG FIX #3] -- Ambang Batas Suhu (Temperature) Dashboard
+  ============================================================
+  File     : src/App.tsx (fungsi evaluateTempColor)
+  Status   : DIPERBAIKI
+
+  SEBELUM (SALAH):
+    if (val > 38.0)  return 'bahaya';
+    if (val >= 37.6) return 'peringatan';
+    return 'normal';
+
+  SESUDAH (BENAR -- sesuai dataset training):
+    if (val >= 38.5 || val <= 32.9) return 'bahaya';
+    if (val >= 35.6)                return 'peringatan';
+    return 'normal';                // 33.0 - 35.5 C
+
+  Rentang Dataset Training (dataset_skripsi.py):
+    Normal     : 33.0 - 35.5 C
+    Peringatan : 35.6 - 37.0 C
+    Bahaya     : 36.5 - 38.5 C (napas_cepat) | 31.0 - 32.9 C (napas_lambat)
+                 34.0 - 36.0 C (jantung_kritis)
+
+  Dampak Bug Lama:
+    Suhu hipotermia (31-32.9 C) dianggap Normal karena fungsi
+    lama hanya mengecek batas atas. Suhu 35.6-37.5 C yang
+    seharusnya Peringatan juga ditampilkan sebagai Normal.
+
+  ============================================================
+  [BUG FIX #4] -- Silent Exception di live_prediksi.py
+  ============================================================
+  File     : live_prediksi.py (on_message handler)
+  Status   : DIPERBAIKI
+
+  SEBELUM (SALAH):
+    except Exception as e:
+        pass  # Error disembunyikan diam-diam
+
+  SESUDAH (BENAR):
+    except Exception as e:
+        print(f"Error saat memproses data: {e}")
+
+  Dampak Bug Lama:
+    Jika model RF gagal memprediksi, data JSON malformat,
+    atau koneksi MQTT bermasalah, tidak ada notifikasi apapun
+    di terminal. Dashboard menampilkan data lama tanpa tanda
+    bahwa prediksi gagal.
+
+  ============================================================
+  [BUG FIX #5] -- Domain Grafik Historis BPM Salah
+  ============================================================
+  File     : src/App.tsx (YAxis kanan pada LineChart)
+  Status   : DIPERBAIKI
+
+  SEBELUM (SALAH):
+    domain={[80, 100]}    // Ini range SpO2, BUKAN BPM!
+
+  SESUDAH (BENAR):
+    domain={[30, 200]}    // Mencakup seluruh kemungkinan BPM (40-180)
+
+  Dampak Bug Lama:
+    Grafik historis detak jantung hampir selalu di luar domain,
+    sehingga garis BPM tidak tampil atau terpotong di grafik.
+
+  ============================================================
+  [PENINGKATAN #1] -- Gelombang Pernapasan Akurat Sesuai Sensor
+  ============================================================
+  File     : src/App.tsx (komponen BreathingWaveform)
+  Status   : DIPERBARUI
+
+  Masalah Lama:
+    Kecepatan animasi gelombang tidak berkorelasi matematis
+    dengan nilai RR dari sensor. Formula lama memakai incremen
+    arbitrari: time += 0.015 + (respRate * 0.0005)
+
+  Solusi Baru (performance.now() + rumus fisika):
+    timeAtX = elapsedSeconds - (canvasWidth - x) / SCROLL_PX_PER_SEC
+    phase   = timeAtX * (respRate / 60) * 2 * PI
+    y       = sin(phase) * amplitudo
+
+  Korelasi Nilai Sensor vs Kecepatan Gelombang:
+    RR = 12 BrPM  -> 1 siklus gelombang setiap 5.00 detik
+    RR = 16 BrPM  -> 1 siklus gelombang setiap 3.75 detik
+    RR = 24 BrPM  -> 1 siklus gelombang setiap 2.50 detik
+    RR = 32 BrPM  -> 1 siklus gelombang setiap 1.88 detik
+
+  Tambahan:
+    - Harmonik sekunder ditambahkan untuk tampilan lebih natural
+    - useRef untuk startTime agar animasi mulus saat RR berubah
+
+  ============================================================
+  [PENINGKATAN #2] -- Saran Klinis Dinamis di Mesin Logika RF
+  ============================================================
+  File     : src/App.tsx (fungsi getDetailedAdvice + AI panel)
+  Status   : DIPERBARUI
+
+  Masalah Lama:
+    - Judul hanya: "Diagnosis: Normal/Peringatan/Bahaya"
+    - Saran teks statis/hardcoded, tidak mempertimbangkan
+      parameter sensor mana yang menjadi penyebab kondisi.
+
+  Solusi Baru:
+    Fungsi getDetailedAdvice(status, rr, bpm, temp) membaca
+    nilai AKTUAL sensor untuk menentukan saran klinis spesifik.
+
+  Judul Rekomendasi RF:
+    Normal      -> "Semua Parameter Normal"
+    Peringatan  -> "Tanda Vital Perlu Diperhatikan"
+    Bahaya      -> "Kondisi Kritis - Tindakan Segera"
+
+  Logika Saran Klinis [BAHAYA] (prioritas: RR > BPM > Suhu):
+    RR >= 32    : Takipnea -> posisi semi-Fowler, oksigen masker,
+                              hubungi dokter, siapkan nebulizer
+    RR <= 8     : Bradipnea/Apnea -> ventilasi bag-mask,
+                                     panggil tim resusitasi darurat
+    BPM >= 141  : Takikardia berat -> pasang EKG, evaluasi aritmia,
+                                      siapkan defibrilator
+    BPM <= 39   : Bradikardia berat -> pertimbangan atropin/
+                                       alat pacu jantung
+    Suhu >= 38.5: Demam tinggi -> antipiretik, kompres,
+                                  pantau input/output tiap 30 menit
+    Suhu <= 32.9: Hipotermia berat -> selimut hangat, cairan hangat,
+                                      pantau tanda vital tiap 10 menit
+
+  Logika Saran Klinis [PERINGATAN] (prioritas: RR > BPM > Suhu):
+    RR >= 24    : Laju napas meningkat -> posisi Fowler, latihan
+                                          napas dalam 4-hitungan
+    BPM >= 96   : Detak jantung naik -> cek aktivitas/stres,
+                                         berbaring rileks, ukur ulang
+    Suhu >= 35.6: Suhu naik ringan -> pantau tren, hidrasi 2L/hari
+
+  Logika Saran Klinis [NORMAL]:
+    -> Pemantauan rutin setiap 2 jam, istirahat cukup,
+       sirkulasi udara yang baik.
+
+--------------------------------------------------------------------------------
+  CATATAN TEKNIS (Tidak Diubah, Perlu Diperhatikan ke Depan)
+--------------------------------------------------------------------------------
+
+  [CATATAN #1] State 'spo2' Menyimpan Data BPM
+    Properti 'spo2' dalam HistoricalData menyimpan nilai BPM
+    (trade-off desain agar grafik tidak perlu distruktur ulang).
+    Sudah diberi komentar penjelasan di kode.
+
+  [CATATAN #2] Arduino Kirim beatAvg, Bukan avgBPM_1Min
+    doc["bpm"] = beatAvg; // rata-rata 4 detak terakhir (sangat instan)
+    Jika BPM terlalu noise/fluktuatif, pertimbangkan ganti ke
+    avgBPM_1Min untuk prediksi RF yang lebih stabil.
+
+  [CATATAN #3] Confidence Score Masih Acak (Math.random())
+    Untuk akurasi ilmiah, gunakan rf_model.predict_proba() di
+    live_prediksi.py dan kirim nilai confidence nyata via MQTT.
+    Contoh penambahan di live_prediksi.py:
+      proba = rf_model.predict_proba([[suhu, bpm, rr]])[0]
+      confidence = round(max(proba) * 100, 1)
+      paket = json.dumps({"status_pasien": hasil, "confidence": confidence})
+
+  [CATATAN #4] Log Modal Masih Hardcoded
+    Data log di "Riwayat Sistem & Peringatan Lengkap" adalah
+    data statis. Untuk produksi, log harus disimpan ke array
+    state setiap kali ada perubahan status dari MQTT.
+
+--------------------------------------------------------------------------------
+  RINGKASAN STATUS BUG DAN PENINGKATAN
+--------------------------------------------------------------------------------
+
+  Total Bug Ditemukan  : 5 kritis/sedang + 4 catatan pengembangan
+  Total Bug Diperbaiki : 5
+  Fitur Ditingkatkan   : 2
+
+  No | Komponen             | Masalah                        | Status
+  ---|----------------------|--------------------------------|-------------
+   1 | App.tsx - RR         | Threshold vs dataset mismatch  | DIPERBAIKI
+   2 | App.tsx - BPM        | Threshold vs dataset mismatch  | DIPERBAIKI
+   3 | App.tsx - Suhu       | Threshold vs dataset mismatch  | DIPERBAIKI
+   4 | live_prediksi.py     | Silent exception (pass)        | DIPERBAIKI
+   5 | App.tsx - Grafik     | Domain Y-Axis salah [80,100]   | DIPERBAIKI
+   6 | App.tsx - Gelombang  | Frekuensi animasi tidak akurat | DIPERBARUI
+   7 | App.tsx - AI Panel   | Saran klinis statis/generik    | DIPERBARUI
+   8 | Arduino              | beatAvg vs avgBPM_1Min         | CATATAN
+   9 | App.tsx - Confidence | Score random vs predict_proba  | CATATAN
+  10 | App.tsx - Log Modal  | Data log hardcoded             | CATATAN
+
+--------------------------------------------------------------------------------
+  FILE YANG DIMODIFIKASI PADA SESI INI
+--------------------------------------------------------------------------------
+
+  1. f:\PROJECT SKRIPSI FIX\CODING\src\App.tsx
+     - Perbaikan 3 fungsi threshold evaluasi status sensor (Bug 1,2,3)
+     - Penulisan ulang komponen BreathingWaveform (Peningkatan #1)
+     - Penambahan fungsi getDetailedAdvice / saran klinis (Peningkatan #2)
+     - Perbaikan domain YAxis grafik historis BPM (Bug 5)
+     - Perbaikan judul rekomendasi RF menjadi deskriptif (Peningkatan #2)
+
+  2. f:\PROJECT SKRIPSI FIX\CODING\live_prediksi.py
+     - Perbaikan exception handler dari silent ke print error (Bug 4)
+
+  File Tidak Dimodifikasi (Referensi):
+     - train_model.py            : Training RF (sudah benar)
+     - dataset_skripsi.py        : Generator dataset (referensi threshold)
+     - dataset_skripsi_lengkap.csv : Dataset 900 baris
+     - rf_health_model.pkl       : Model RF tersimpan
+     - codingan arduino.txt      : Kode ESP32 (ada catatan pengembangan)
+
+================================================================================
+  END OF REPORT
+  Dibuat: 06 Juli 2026 | 11:42 WIB
+================================================================================

@@ -1,0 +1,385 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h> // [WAJIB] Library untuk koneksi aman TLS/SSL HiveMQ
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <MPU6050.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ======================================================
+// KONFIGURASI WIFI & MQTT BROKER (HIVEMQ CLOUD)
+// ======================================================
+const char* ssid          = "yuannatan";
+const char* password      = "yangtaucumayuan";
+
+const char* mqtt_server   = "096d892966dc40f687e38c2a80e38de8.s1.eu.hivemq.cloud"; 
+const int   mqtt_port     = 8883;
+
+const char* mqtt_user     = "yuannatan"; 
+const char* mqtt_password = "Yuanmqtt123"; 
+
+const char* mqtt_topic    = "health/monitoring/data";
+
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+unsigned long mqttPublishTimer = 0;
+const long publishInterval = 2000;
+
+// ======================================================
+// KONFIGURASI MULTIPLEXER (TCA9548A)
+// ======================================================
+#define TCA_ADDR        0x70
+#define CH_MPU          1   
+#define CH_MAX          0   
+
+void tcaSelect(uint8_t ch) {
+  Wire.beginTransmission(TCA_ADDR);
+  Wire.write(ch > 7 ? 0x00 : (1 << ch));
+  Wire.endTransmission();
+  delayMicroseconds(150); 
+}
+
+// ======================================================
+// KONFIGURASI DS18B20 (SUHU)
+// ======================================================
+#define DS18B20_PIN 4
+OneWire oneWire(DS18B20_PIN);
+DallasTemperature bodyTemp(&oneWire);
+
+float currentTemp = 0.0;
+unsigned long tempTimer = 0;
+
+// ======================================================
+// KONFIGURASI MAX30102 (HEART RATE)
+// ======================================================
+MAX30105 particleSensor;
+
+long lastBeat = 0;
+float beatsPerMinute = 0;
+
+const byte RATE_SIZE = 4; 
+byte rates[RATE_SIZE]; 
+byte rateSpot = 0;
+long beatAvg = 0; 
+
+float bpmSum = 0;
+int bpmCount = 0;
+float avgBPM_1Min = 0;
+long currentIR = 0;
+
+unsigned long bpmTimer = 0;
+unsigned long lastMaxTime = 0; 
+
+// ======================================================
+// KONFIGURASI MPU6050 (RESPIRATORY RATE)
+// ======================================================
+MPU6050 mpu;
+
+#define N_CALIB         1000
+#define N_AVG           30      
+#define WIN_SEC         15      
+#define SAMPLE_MS       10      
+#define STAT_BUF        300     
+#define MIN_PEAK_DELAY  1000    
+
+int16_t ax_off=0, ay_off=0, az_off=0;
+int16_t gx_off=0, gy_off=0, gz_off=0;
+
+float  avgBuf[N_AVG]    = {0};
+int    avgIdx           = 0;
+float  statBuf[STAT_BUF]= {0};
+int    statIdx          = 0;
+
+float  sigMean = 0, sigStd = 0, dynThresh = 0;
+
+int           peakCount = 0;
+bool          prevAbove = false;
+int           bestAxisIdx = 2;  
+
+float currentRR = 0; 
+
+unsigned long winStart = 0;
+unsigned long lastPeakTime = 0;
+unsigned long lastMpuTime = 0;
+unsigned long printTimer = 0;
+
+// ======================================================
+// FUNGSI MPU6050
+// ======================================================
+float getAxisVal(int16_t ax, int16_t ay, int16_t az) {
+  switch(bestAxisIdx) {
+    case 0: return ax / 16384.0;
+    case 1: return ay / 16384.0;
+    default: return az / 16384.0;
+  }
+}
+
+float movingAverage(float val) {
+  avgBuf[avgIdx % N_AVG] = val;
+  avgIdx++;
+  float s = 0;
+  for (int i = 0; i < N_AVG; i++) s += avgBuf[i];
+  return s / N_AVG;
+}
+
+void calcStats() {
+  float sum = 0;
+  for (int i = 0; i < STAT_BUF; i++) sum += statBuf[i];
+  sigMean = sum / STAT_BUF;
+  float var = 0;
+  for (int i = 0; i < STAT_BUF; i++) var += (statBuf[i]-sigMean)*(statBuf[i]-sigMean);
+  sigStd = sqrt(var / STAT_BUF);
+  dynThresh = 0.4f * sigStd;
+}
+
+void detectBestAxis() {
+  Serial.println("Deteksi sumbu: bernapas normal 5 detik...");
+  float sX=0, sY=0, sZ=0, sX2=0, sY2=0, sZ2=0;
+  int16_t ax, ay, az, gx, gy, gz;
+  const int N=500;
+  tcaSelect(CH_MPU);
+  for(int i=0; i<N; i++){
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    float x=ax/16384.0, y=ay/16384.0, z=az/16384.0;
+    sX+=x; sY+=y; sZ+=z; sX2+=x*x; sY2+=y*y; sZ2+=z*z;
+    delay(10);
+  }
+  float vX=sX2/N-(sX/N)*(sX/N);
+  float vY=sY2/N-(sY/N)*(sY/N);
+  float vZ=sZ2/N-(sZ/N)*(sZ/N);
+  
+  if(vX>vY && vX>vZ){ bestAxisIdx=0; Serial.println("=> Sumbu X Terpilih"); }
+  else if(vY>vX && vY>vZ){ bestAxisIdx=1; Serial.println("=> Sumbu Y Terpilih"); }
+  else { bestAxisIdx=2; Serial.println("=> Sumbu Z Terpilih"); }
+}
+
+void calibrate() {
+  Serial.println("Kalibrasi MPU6050: Letakkan sensor diam di dada...");
+  delay(2000);
+  long ax_s=0, ay_s=0, az_s=0, gx_s=0, gy_s=0, gz_s=0;
+  int16_t ax, ay, az, gx, gy, gz;
+  tcaSelect(CH_MPU);
+  for(int i=0; i<N_CALIB; i++){
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    ax_s+=ax; ay_s+=ay; az_s+=az;
+    gx_s+=gx; gy_s+=gy; gz_s+=gz;
+    delay(3);
+  }
+  ax_off=ax_s/N_CALIB; ay_off=ay_s/N_CALIB; az_off=az_s/N_CALIB-16384;
+  gx_off=gx_s/N_CALIB; gy_off=gy_s/N_CALIB; gz_off=gz_s/N_CALIB;
+  
+  mpu.setXAccelOffset(-ax_off/8);
+  mpu.setYAccelOffset(-ay_off/8);
+  mpu.setZAccelOffset(-az_off/8);
+  mpu.setXGyroOffset(-gx_off/4);
+  mpu.setYGyroOffset(-gy_off/4);
+  mpu.setZGyroOffset(-gz_off/4);
+  Serial.println("Kalibrasi selesai.");
+}
+
+// ======================================================
+// FUNGSI KONEKSI WIFI & MQTT
+// ======================================================
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Menghubungkan ke ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  if(WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Terhubung!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    espClient.setInsecure(); 
+  } else {
+    Serial.println("\nGagal terhubung ke WiFi.");
+  }
+}
+
+void reconnectMQTT() {
+  static unsigned long lastReconnectAttempt = 0;
+  unsigned long now = millis();
+  
+  if (!client.connected()) {
+    if (now - lastReconnectAttempt > 5000) { 
+      lastReconnectAttempt = now;
+      Serial.print("Mencoba koneksi MQTT HiveMQ...");
+      
+      String clientId = "ESP32Health-" + String(random(0, 9999));
+      
+      if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
+        Serial.println("Terhubung ke MQTT Broker!");
+      } else {
+        Serial.print("Gagal, rc=");
+        Serial.print(client.state());
+        Serial.println(" Coba lagi dalam 5 detik.");
+      }
+    }
+  }
+}
+
+// ======================================================
+// SETUP
+// ======================================================
+void setup() {
+  Serial.begin(115200);
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+
+  Wire.begin();
+  Wire.setClock(100000); 
+  
+  Serial.println("\n====================================");
+  Serial.println(" Health Monitoring System Dimulai");
+  Serial.println("====================================");
+
+  bodyTemp.begin();
+  bodyTemp.setWaitForConversion(false);
+  bodyTemp.requestTemperatures();
+
+  tcaSelect(CH_MAX);
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println("ERROR: MAX30102 tidak terdeteksi di Channel 0!");
+  } else {
+    particleSensor.setup();
+    particleSensor.setPulseAmplitudeRed(0x0A);
+    particleSensor.setPulseAmplitudeGreen(0);
+    Serial.println("MAX30102 OK di Channel 0.");
+  }
+
+  tcaSelect(CH_MPU);
+  mpu.initialize();
+  if(!mpu.testConnection()){
+    Serial.println("ERROR: MPU6050 tidak terdeteksi di Channel 1!");
+    while(1);
+  }
+  Serial.println("MPU6050 OK di Channel 1.");
+  mpu.setDLPFMode(MPU6050_DLPF_BW_42);
+  calibrate();
+  detectBestAxis();
+
+  unsigned long now = millis();
+  winStart = now; bpmTimer = now; tempTimer = now;
+  printTimer = now; lastMpuTime = now; lastMaxTime = now;
+  mqttPublishTimer = now;
+
+  Serial.println("Sistem Siap. Monitoring real-time berjalan...");
+}
+
+// ======================================================
+// LOOP UTAMA
+// ======================================================
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!client.connected()) {
+      reconnectMQTT();
+    } else {
+      client.loop();
+    }
+  }
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastMpuTime >= SAMPLE_MS) {
+    lastMpuTime = currentMillis;
+    tcaSelect(CH_MPU);
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    float raw      = getAxisVal(ax, ay, az);
+    float filtered = movingAverage(raw);
+    statBuf[statIdx % STAT_BUF] = filtered;
+    statIdx++;
+    if (statIdx % STAT_BUF == 0) calcStats();
+    float centered = filtered - sigMean;
+    bool above = (centered > dynThresh && dynThresh > 0.00005f);
+    if (above && !prevAbove) {
+      if (currentMillis - lastPeakTime > MIN_PEAK_DELAY) {
+        peakCount++;
+        lastPeakTime = currentMillis;
+      }
+    }
+    prevAbove = above;
+  }
+
+  float elapsedRR = (currentMillis - winStart) / 1000.0;
+  if (elapsedRR >= WIN_SEC) {
+    currentRR = (peakCount / elapsedRR) * 60.0;
+    peakCount = 0;
+    winStart = currentMillis;
+  }
+
+  if (currentMillis - lastMaxTime >= 10) {
+    lastMaxTime = currentMillis;
+    tcaSelect(CH_MAX);
+    currentIR = particleSensor.getIR();
+    if (checkForBeat(currentIR) == true) {
+      long delta = currentMillis - lastBeat;
+      lastBeat = currentMillis;
+      beatsPerMinute = 60.0 / (delta / 1000.0);
+      if (beatsPerMinute > 30 && beatsPerMinute < 250) {
+        rates[rateSpot++] = (byte)beatsPerMinute;
+        rateSpot %= RATE_SIZE;
+        beatAvg = 0;
+        for (byte x = 0 ; x < RATE_SIZE ; x++) beatAvg += rates[x];
+        beatAvg /= RATE_SIZE;
+        bpmSum += beatAvg;
+        bpmCount++;
+      }
+    }
+    if (currentIR < 50000) beatAvg = 0;
+  }
+
+  if (currentMillis - bpmTimer >= 60000) {
+    if (bpmCount > 0) avgBPM_1Min = bpmSum / bpmCount;
+    bpmSum = 0; bpmCount = 0;
+    bpmTimer = currentMillis;
+  }
+
+  if (currentMillis - tempTimer >= 2000) {
+    currentTemp = bodyTemp.getTempCByIndex(0);
+    bodyTemp.requestTemperatures(); 
+    tempTimer = currentMillis;
+  }
+
+  if (currentMillis - mqttPublishTimer >= publishInterval) {
+    mqttPublishTimer = currentMillis;
+    
+    Serial.println("================================");
+    Serial.print("Suhu Tubuh  : "); Serial.print(currentTemp); Serial.println(" C");
+    Serial.print("BPM Saat Ini: "); Serial.println(beatAvg); 
+    Serial.print("BPM Rata(1M): "); Serial.println(avgBPM_1Min);
+    Serial.print("Laju Napas  : "); Serial.print(currentRR); Serial.println(" BrPM");
+    Serial.print("Nilai IR    : "); Serial.println(currentIR);
+    Serial.println("================================");
+
+    if (client.connected()) {
+      StaticJsonDocument<200> doc;
+      doc["suhu"] = currentTemp;
+      doc["bpm"]  = beatAvg;
+      doc["rr"]   = currentRR;
+
+      char jsonBuffer[512];
+      serializeJson(doc, jsonBuffer);
+
+      if (client.publish(mqtt_topic, jsonBuffer)) {
+        Serial.print("MQTT Sent [OK]: ");
+        Serial.println(jsonBuffer);
+      } else {
+        Serial.println("MQTT Sent [FAILED]");
+      }
+    }
+  }
+}

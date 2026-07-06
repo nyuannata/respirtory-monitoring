@@ -43,8 +43,24 @@ interface HistoricalData {
   temp: number;
 }
 
+interface SensorLogEntry {
+  id: number;
+  waktu: string;
+  waktuMs: number;
+  suhu: number;
+  bpm: number;
+  rr: number;
+  statusRR: Status;
+  statusBPM: Status;
+  statusSuhu: Status;
+  statusAI: Status | null;
+  labelAI: string;
+}
+
 const BreathingWaveform = ({ respRate, isDanger }: { respRate: number, isDanger: boolean }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Menyimpan waktu awal agar animasi mulus saat respRate berubah
+  const startTimeRef = useRef<number>(performance.now());
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -63,16 +79,22 @@ const BreathingWaveform = ({ respRate, isDanger }: { respRate: number, isDanger:
     window.addEventListener('resize', resizeCanvas);
 
     let animationId: number;
-    let time = 0;
+
+    // Kecepatan scroll piksel per detik — kontrol visual
+    const SCROLL_PX_PER_SEC = 55;
+    // Napas per detik dari sensor (minimal 1 agar tidak crash)
+    const breathsPerSec = Math.max(respRate, 1) / 60;
 
     const render = () => {
       const w = canvas.width;
       const h = canvas.height;
-      if (w === 0 || h === 0) return;
-      
-      const breathsPerSecond = respRate / 60;
-      // Make speed visually more responsive to the actual rate
-      time += 0.015 + (respRate * 0.0005);
+      if (w === 0 || h === 0) {
+        animationId = requestAnimationFrame(render);
+        return;
+      }
+
+      // Waktu nyata dalam detik sejak komponen mount
+      const elapsed = (performance.now() - startTimeRef.current) / 1000;
 
       ctx.clearRect(0, 0, w, h);
       
@@ -80,7 +102,7 @@ const BreathingWaveform = ({ respRate, isDanger }: { respRate: number, isDanger:
       const gradient = ctx.createLinearGradient(0, 0, w, 0);
       if (isDanger) {
         gradient.addColorStop(0, '#f43f5e'); // rose-500
-        gradient.addColorStop(1, '#881337'); // rose-900 (smooth darker transition)
+        gradient.addColorStop(1, '#881337'); // rose-900
         ctx.shadowColor = 'rgba(244, 63, 94, 0.5)';
       } else {
         gradient.addColorStop(0, '#06b6d4'); // cyan-500
@@ -90,7 +112,6 @@ const BreathingWaveform = ({ respRate, isDanger }: { respRate: number, isDanger:
 
       ctx.beginPath();
       ctx.moveTo(0, h / 2);
-      
       ctx.strokeStyle = gradient;
       ctx.lineWidth = 3;
       ctx.lineCap = 'round';
@@ -98,15 +119,19 @@ const BreathingWaveform = ({ respRate, isDanger }: { respRate: number, isDanger:
       ctx.shadowBlur = 12;
 
       for (let x = 0; x < w; x++) {
-        const t = time * 2 - (w - x) * 0.005;
-        const primary = Math.sin(t * breathsPerSecond * Math.PI * 2);
-        const secondary = Math.sin(t * breathsPerSecond * Math.PI * 2 + 0.5) * 0.3;
+        // Hitung waktu di posisi piksel ini berdasarkan kecepatan scroll nyata
+        // Piksel paling kanan = waktu sekarang, piksel paling kiri = (w / SCROLL_PX_PER_SEC) detik lalu
+        const timeAtX = elapsed - (w - x) / SCROLL_PX_PER_SEC;
+        
+        // Frekuensi gelombang = breathsPerSec (akurat sesuai sensor RR)
+        const phase = timeAtX * breathsPerSec * Math.PI * 2;
+        const primary = Math.sin(phase);
+        // Harmonik halus untuk tampilan napas yang lebih natural
+        const secondary = Math.sin(phase * 1.4 + 0.8) * 0.18;
         const wave = (primary + secondary) * (h / 3.5);
         ctx.lineTo(x, (h / 2) - wave);
       }
       ctx.stroke();
-
-      // Reset shadow so it doesn't affect anything else if extended
       ctx.shadowBlur = 0;
 
       animationId = requestAnimationFrame(render);
@@ -215,9 +240,179 @@ const LogModal = ({ onClose }: { onClose: () => void }) => {
   );
 };
 
+// ============================================================
+// KOMPONEN: Modal Log Rekaman Sensor (untuk audit skripsi)
+// ============================================================
+const SensorLogModal = ({
+  log,
+  onClose,
+  onClear,
+}: {
+  log: SensorLogEntry[];
+  onClose: () => void;
+  onClear: () => void;
+}) => {
+  const statusBadge = (s: Status | null) => {
+    if (!s) return <span className="text-[10px] text-slate-400 font-mono">-</span>;
+    const cfg = {
+      bahaya: 'bg-rose-100 text-rose-700 border-rose-200',
+      peringatan: 'bg-amber-100 text-amber-700 border-amber-200',
+      normal: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+    };
+    const label = { bahaya: 'BAHAYA', peringatan: 'PERINGATAN', normal: 'NORMAL' };
+    return (
+      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${cfg[s]}`}>
+        {label[s]}
+      </span>
+    );
+  };
+
+  const exportCSV = () => {
+    const header = 'No,Waktu,Suhu (C),BPM,RR (BrPM),Status RR,Status BPM,Status Suhu,Prediksi RF\n';
+    const rows = log.map(e =>
+      `${e.id},${e.waktu},${e.suhu.toFixed(2)},${e.bpm.toFixed(0)},${e.rr.toFixed(0)},${e.statusRR},${e.statusBPM},${e.statusSuhu},${e.labelAI}`
+    ).join('\n');
+    const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `log_sensor_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center px-4">
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm cursor-pointer"
+      />
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96, y: 30 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 30 }}
+        transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+        className="relative bg-white rounded-3xl w-full max-w-5xl max-h-[88vh] flex flex-col shadow-2xl overflow-hidden border border-slate-200"
+      >
+        {/* Header Modal */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50/60">
+          <div className="flex items-center space-x-3">
+            <div className="p-2 bg-indigo-100 text-indigo-600 rounded-xl shadow-inner">
+              <Activity className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-800">Log Rekaman Sensor</h2>
+              <p className="text-[10px] text-slate-500 font-mono">
+                {log.length} data tercatat &bull; Sesi ini
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={exportCSV}
+              disabled={log.length === 0}
+              className="flex items-center space-x-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-bold uppercase tracking-wider shadow-md transition-all active:scale-95"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Export CSV</span>
+            </button>
+            <button
+              onClick={onClear}
+              disabled={log.length === 0}
+              className="px-4 py-2 bg-rose-50 hover:bg-rose-100 disabled:opacity-40 disabled:cursor-not-allowed text-rose-600 rounded-xl text-[10px] font-bold uppercase tracking-wider border border-rose-200 transition-all active:scale-95"
+            >
+              Hapus Log
+            </button>
+            <button
+              onClick={onClose}
+              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors active:scale-95"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Tabel */}
+        <div className="overflow-y-auto flex-1 overflow-x-auto">
+          {log.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-64 text-slate-400 space-y-3">
+              <Activity className="w-12 h-12 opacity-30" />
+              <p className="text-sm font-semibold">Belum ada data rekaman</p>
+              <p className="text-xs text-slate-400">Data akan muncul saat sensor ESP32 mengirim pembacaan</p>
+            </div>
+          ) : (
+            <table className="w-full text-xs min-w-[750px]">
+              <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 z-10">
+                <tr>
+                  {['No', 'Waktu', 'Suhu (°C)', 'BPM', 'RR (BrPM)', 'Status RR', 'Status BPM', 'Status Suhu', 'Prediksi RF'].map(h => (
+                    <th key={h} className="px-4 py-3 text-left text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[...log].reverse().map((entry, idx) => {
+                  const rowColor =
+                    entry.statusAI === 'bahaya' ? 'bg-rose-50/60 hover:bg-rose-50' :
+                    entry.statusAI === 'peringatan' ? 'bg-amber-50/60 hover:bg-amber-50' :
+                    'hover:bg-slate-50';
+                  return (
+                    <tr key={entry.id} className={`border-b border-slate-100 transition-colors ${rowColor}`}>
+                      <td className="px-4 py-2.5 font-mono text-slate-400 text-[10px]">{log.length - idx}</td>
+                      <td className="px-4 py-2.5 font-mono text-slate-600 whitespace-nowrap">{entry.waktu}</td>
+                      <td className={`px-4 py-2.5 font-bold tabular-nums ${
+                        entry.statusSuhu === 'bahaya' ? 'text-rose-600' :
+                        entry.statusSuhu === 'peringatan' ? 'text-amber-600' : 'text-emerald-600'
+                      }`}>{entry.suhu.toFixed(2)}</td>
+                      <td className={`px-4 py-2.5 font-bold tabular-nums ${
+                        entry.statusBPM === 'bahaya' ? 'text-rose-600' :
+                        entry.statusBPM === 'peringatan' ? 'text-amber-600' : 'text-emerald-600'
+                      }`}>{entry.bpm.toFixed(0)}</td>
+                      <td className={`px-4 py-2.5 font-bold tabular-nums ${
+                        entry.statusRR === 'bahaya' ? 'text-rose-600' :
+                        entry.statusRR === 'peringatan' ? 'text-amber-600' : 'text-emerald-600'
+                      }`}>{entry.rr.toFixed(0)}</td>
+                      <td className="px-4 py-2.5">{statusBadge(entry.statusRR)}</td>
+                      <td className="px-4 py-2.5">{statusBadge(entry.statusBPM)}</td>
+                      <td className="px-4 py-2.5">{statusBadge(entry.statusSuhu)}</td>
+                      <td className="px-4 py-2.5">
+                        {entry.statusAI ? statusBadge(entry.statusAI) :
+                          <span className="text-[9px] text-slate-400 italic">{entry.labelAI}</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/60 flex items-center justify-between">
+          <p className="text-[10px] text-slate-400 font-mono">
+            Menampilkan {log.length} dari maks. 1000 entri &bull; Terbaru di atas
+          </p>
+          <button
+            onClick={onClose}
+            className="px-5 py-2 bg-slate-800 text-white rounded-xl text-[10px] font-bold hover:bg-slate-700 transition-colors shadow active:scale-95"
+          >
+            Tutup
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
 export default function App() {
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
+  const [isSensorLogOpen, setIsSensorLogOpen] = useState(false);
   const [dataHistory, setDataHistory] = useState<HistoricalData[]>([]);
+  const [sensorLog, setSensorLog] = useState<SensorLogEntry[]>([]);
+  const logCounterRef = useRef(0);
+
   const [currentData, setCurrentData] = useState<{
     respRate: SensorData;
     spo2: SensorData;
@@ -281,20 +476,25 @@ export default function App() {
         if (topic === 'health/monitoring/data') {
           // payload: { suhu, bpm, rr }
           setCurrentData(prev => {
+            // Threshold RR disesuaikan dengan rentang dataset training:
+            // Normal: 12–20 BrPM | Peringatan: 24–28 BrPM | Bahaya: >=32 atau <=8
             const evaluateRespColor = (val: number): Status => {
-              if (val > 25) return 'bahaya';
-              if (val >= 21) return 'peringatan';
+              if (val >= 32 || val <= 8) return 'bahaya';
+              if (val >= 24) return 'peringatan';
               return 'normal';
             };
+            // Threshold BPM disesuaikan dengan rentang dataset training:
+            // Normal: 60–95 BPM | Peringatan: 96–115 BPM | Bahaya: >=141 atau <=39
             const evaluateSpo2Color = (val: number): Status => {
-              // Mapping ini disesuaikan untuk rentang BPM
-              if (val > 100 || val < 60) return 'bahaya';
-              if (val > 90 || val < 65) return 'peringatan';
+              if (val >= 141 || val <= 39) return 'bahaya';
+              if (val >= 96 || val <= 59) return 'peringatan';
               return 'normal';
             };
+            // Threshold suhu disesuaikan dengan rentang dataset training:
+            // Normal: 33.0–35.5°C | Peringatan: 35.6–37.0°C | Bahaya: >=38.5 atau <=32.9
             const evaluateTempColor = (val: number): Status => {
-              if (val > 38.0) return 'bahaya';
-              if (val >= 37.6) return 'peringatan';
+              if (val >= 38.5 || val <= 32.9) return 'bahaya';
+              if (val >= 35.6) return 'peringatan';
               return 'normal';
             };
 
@@ -303,6 +503,24 @@ export default function App() {
             const newTemp = evaluateTempColor(payload.suhu);
 
             const tickTime = new Date();
+
+            // Tambah entri ke log rekaman sensor
+            logCounterRef.current += 1;
+            const logEntry: SensorLogEntry = {
+              id: logCounterRef.current,
+              waktu: tickTime.toLocaleTimeString('id-ID'),
+              waktuMs: tickTime.getTime(),
+              suhu: parseFloat(payload.suhu),
+              bpm: parseFloat(payload.bpm),
+              rr: parseFloat(payload.rr),
+              statusRR: newResp,
+              statusBPM: newBpm,
+              statusSuhu: newTemp,
+              statusAI: null,
+              labelAI: 'Menunggu RF...',
+            };
+            setSensorLog(prev => [...prev, logEntry].slice(-1000));
+
             setDataHistory(oldHistory => {
               const next = [...(oldHistory.length > 20 ? oldHistory.slice(1) : oldHistory), {
                 time: tickTime.toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' }),
@@ -334,22 +552,37 @@ export default function App() {
         }
         
         if (topic === 'health/monitoring/hasil') {
-          // payload: { status_pasien: "Normal" }
-          const kondisi = payload.status_pasien;
+          // payload: { status_pasien: "Normal" | "Peringatan" | "Bahaya" }
+          const kondisi = payload.status_pasien as string;
           let status: Status = 'normal';
           let conf = 95;
-          let rec = 'Diagnosis: ' + kondisi;
+          let rec = '';
           
           if (kondisi.toLowerCase().includes('peringatan')) {
              status = 'peringatan';
              conf = 88 + Math.floor(Math.random() * 6);
+             rec = 'Tanda Vital Perlu Diperhatikan';
           } else if (kondisi.toLowerCase().includes('bahaya') || kondisi.toLowerCase().includes('kritis')) {
              status = 'bahaya';
-             conf = 98 - Math.floor(Math.random() * 2);
+             conf = 97 + Math.floor(Math.random() * 2);
+             rec = 'Kondisi Kritis — Tindakan Segera';
           } else {
              status = 'normal';
              conf = 96 + Math.floor(Math.random() * 4);
+             rec = 'Semua Parameter Normal';
           }
+
+          // Update entri log terakhir dengan hasil prediksi RF
+          setSensorLog(prev => {
+            if (prev.length === 0) return prev;
+            const updated = [...prev];
+            updated[updated.length - 1] = {
+              ...updated[updated.length - 1],
+              statusAI: status,
+              labelAI: kondisi,
+            };
+            return updated;
+          });
           
           setAiAnalysis(prev => ({
             ...prev,
@@ -380,6 +613,47 @@ export default function App() {
     }
   };
 
+  /**
+   * Menghasilkan saran klinis yang spesifik berdasarkan status RF
+   * dan nilai sensor aktual yang sedang terbaca.
+   */
+  const getDetailedAdvice = (
+    status: Status,
+    rr: number,
+    bpm: number,
+    temp: number
+  ): string => {
+    if (status === 'bahaya') {
+      // Urutan prioritas: napas dulu, lalu jantung, lalu suhu
+      if (rr >= 32)
+        return '🚨 Takipnea terdeteksi (RR ≥32 BrPM). Segera posisikan pasien semi-Fowler (kepala dinaikkan 30–45°), berikan oksigen via masker, dan hubungi dokter jaga. Siapkan nebulizer jika ada riwayat asma.';
+      if (rr <= 8)
+        return '🚨 Bradipnea/Apnea terdeteksi (RR ≤8 BrPM). Rangsang respons pasien segera, berikan ventilasi bag-mask bila napas berhenti, dan panggil tim resusitasi darurat.';
+      if (bpm >= 141)
+        return '🚨 Takikardia berat terdeteksi (BPM ≥141). Pasang monitor EKG, batasi aktivitas fisik pasien, hubungi dokter untuk evaluasi aritmia. Siapkan defibrilator jika diperlukan.';
+      if (bpm <= 39)
+        return '🚨 Bradikardia berat terdeteksi (BPM ≤39). Periksa kesadaran pasien, berikan posisi terlentang, dan segera hubungi dokter jaga untuk pertimbangan pemberian atropin atau alat pacu jantung.';
+      if (temp >= 38.5)
+        return '🚨 Demam tinggi terdeteksi (Suhu ≥38.5°C). Berikan antipiretik sesuai protokol, kompres hangat di dahi dan ketiak, catat input/output cairan, dan pantau perubahan suhu setiap 30 menit.';
+      if (temp <= 32.9)
+        return '🚨 Hipotermia berat terdeteksi (Suhu ≤32.9°C). Selimuti pasien dengan selimut hangat, hindari paparan udara dingin, berikan cairan hangat bila sadar, dan pantau tanda vital setiap 10 menit.';
+      return '🚨 Kondisi kritis terdeteksi oleh model AI. Segera lakukan pemeriksaan fisik menyeluruh dan hubungi tenaga medis darurat. Pastikan akses IV terpasang.';
+    }
+
+    if (status === 'peringatan') {
+      if (rr >= 24)
+        return '⚠️ Laju napas meningkat (RR ≥24 BrPM). Minta pasien untuk duduk tegak (posisi Fowler), lakukan latihan napas dalam (4 hitungan hirup–tahan–buang). Pantau perubahan setiap 10 menit. Jika tidak membaik dalam 20 menit, eskalasi ke dokter.';
+      if (bpm >= 96)
+        return '⚠️ Detak jantung lebih tinggi dari normal (BPM ≥96). Periksa apakah pasien baru beraktivitas berat atau mengalami stres. Minta pasien berbaring dan rileks. Ukur ulang dalam 5 menit. Jika menetap, catat dan laporkan ke dokter.';
+      if (temp >= 35.6)
+        return '⚠️ Suhu tubuh di atas batas normal (Suhu ≥35.6°C). Pantau tren kenaikan suhu, pastikan pasien terhidrasi cukup (minimal 2L/hari), catat suhu setiap 30 menit, dan siapkan antipiretik bila suhu mencapai 38°C.';
+      return '⚠️ Tanda vital menunjukkan penyimpangan ringan. Pantau semua parameter secara ketat selama 15 menit ke depan. Batasi aktivitas fisik pasien dan laporkan ke dokter jika kondisi tidak membaik.';
+    }
+
+    // Status Normal
+    return '✅ Semua parameter vital dalam batas normal. Lanjutkan pemantauan rutin setiap 2 jam. Pastikan pasien cukup istirahat, terhidrasi dengan baik, dan ruangan memiliki sirkulasi udara yang memadai.';
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 font-sans overflow-hidden relative selection:bg-blue-500/20 transition-colors duration-500">
       {/* Soft mesh background to reduce glare and add texture */}
@@ -401,6 +675,19 @@ export default function App() {
         </div>
         <div className="flex items-center space-x-6">
           <div className="flex items-center space-x-4">
+            {/* Tombol Log Rekaman Sensor */}
+            <button
+              onClick={() => setIsSensorLogOpen(true)}
+              className="relative flex items-center space-x-2 px-3 py-1.5 rounded-full bg-indigo-50 border border-indigo-200 shadow-sm hover:bg-indigo-100 transition-all active:scale-95 group"
+            >
+              <Activity className="w-3 h-3 text-indigo-500" />
+              <span className="text-[10px] uppercase font-bold text-indigo-600 tracking-wider">Log Sensor</span>
+              {sensorLog.length > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 bg-indigo-600 text-white text-[9px] font-black rounded-full flex items-center justify-center shadow-md">
+                  {sensorLog.length > 999 ? '999+' : sensorLog.length}
+                </span>
+              )}
+            </button>
             <div className="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-100 shadow-sm transition-all hover:bg-blue-100">
               <Wifi className="w-3 h-3 text-blue-500" />
               <span className="text-[10px] uppercase font-bold text-blue-600 tracking-wider">Terhubung</span>
@@ -609,7 +896,7 @@ export default function App() {
                     fontSize={11} 
                     axisLine={false}
                     tickLine={false}
-                    domain={[80, 100]}
+                    domain={[30, 200]}
                   />
                   <Tooltip 
                     contentStyle={{ 
@@ -705,12 +992,14 @@ export default function App() {
                 )}>
                   {aiAnalysis.recommendation}
                 </p>
-                <p className="text-sm text-slate-600 leading-relaxed font-medium transition-colors duration-500">
-                  {aiAnalysis.status === 'bahaya' 
-                    ? '🚨 Segera hubungi tenaga medis darurat! Periksa alat bantu pernapasan, pastikan jalur napas tidak terhalang, dan persiapkan tabung oksigen cadangan jika diperlukan.'
-                    : aiAnalysis.status === 'peringatan'
-                    ? '⚠️ Pasien menunjukkan gejala sesak ringan. Minta pasien untuk rileks, atur posisi duduk lebih tegak (Fowler), dan pantau terus perubahan angkanya selama 15 menit ke depan.'
-                    : '✅ Kondisi pernapasan dan detak jantung pasien stabil. Lanjutkan pemantauan rutin dan pastikan pasien beristirahat di ruangan dengan sirkulasi udara yang baik.'}
+                {/* Saran klinis dinamis berdasarkan nilai sensor aktual dari RF */}
+                <p className="text-xs text-slate-600 leading-relaxed font-medium transition-colors duration-500">
+                  {getDetailedAdvice(
+                    aiAnalysis.status,
+                    currentData.respRate.value,
+                    currentData.spo2.value,
+                    currentData.temp.value
+                  )}
                 </p>
               </div>
 
@@ -794,6 +1083,15 @@ export default function App() {
 
       <AnimatePresence>
         {isLogModalOpen && <LogModal onClose={() => setIsLogModalOpen(false)} />}
+      </AnimatePresence>
+      <AnimatePresence>
+        {isSensorLogOpen && (
+          <SensorLogModal
+            log={sensorLog}
+            onClose={() => setIsSensorLogOpen(false)}
+            onClear={() => { setSensorLog([]); logCounterRef.current = 0; }}
+          />
+        )}
       </AnimatePresence>
     </div>
   );

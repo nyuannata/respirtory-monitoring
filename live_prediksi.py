@@ -46,7 +46,7 @@ def on_message(client, userdata, msg):
         client.publish(TOPIC_KIRIM, paket_hasil)
 
     except Exception as e:
-        pass
+        print(f"❌ Error saat memproses data: {e}")
 
 client = mqtt.Client()
 client.username_pw_set(USERNAME, PASSWORD)
